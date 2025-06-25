@@ -17,7 +17,6 @@ from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from firebase_admin import credentials, firestore, initialize_app
-
 from flask import Flask
 from waitress import serve
 
@@ -244,9 +243,8 @@ async def monitor_burns():
 
 # Telegram Functions
 async def send_telegram_message(message: str):
-    """Sends a message to the Telegram chat."""
-    global bot
-    if not bot and TELEGRAM_CHAT_ID:
+    """Sends a message to the Telegram chat isotherms    global bot
+    if not bot or not TELEGRAM_CHAT_ID:
         logger.error("Telegram Bot or Chat ID not initialized. Cannot send message.")
         return
     try:
@@ -298,32 +296,40 @@ async def total_burn_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def init_bot_components():
     """Initializes Telegram bot and starts async tasks."""
     global bot, application
-    # Log environment variables status
-    env_vars = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TOKEN_MINT_ADDRESS", "GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64", "SOLANA_RPC_URL", "SOLANA_WS_URL"]
-    missing_vars = []
-    for var in env_vars:
-        value = os.getenv(var)
-        if not value:
-            missing_vars.append(var)
-        logger.info(f"Environment variable {var}: {'set' if value else 'not set'}")
+    # Enhanced environment variable validation
+    env_vars = {
+        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
+        "TOKEN_MINT_ADDRESS": TOKEN_MINT_ADDRESS_STR,
+        "GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64": FIREBASE_SERVICE_ACCOUNT_JSON_BASE64,
+        "SOLANA_RPC_URL": SOLANA_RPC_URL,
+        "SOLANA_WS_URL": SOLANA_WS_URL
+    }
+    missing_vars = [key for key, value in env_vars.items() if not value]
     if missing_vars:
         logger.critical(f"Missing environment variables: {missing_vars}. Bot cannot start.")
-        return
+        raise SystemExit(f"Missing environment variables: {missing_vars}")
+    for key, value in env_vars.items():
+        logger.info(f"Environment variable {key}: {'set' if value else 'not set'}")
+    
     # Initialize Firebase (optional)
     initialize_firebase()
+    
     # Initialize Telegram bot
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
     try:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         bot_info = await bot.get_me()
         logger.info(f"Telegram bot initialized as @{bot_info.username}")
     except TelegramError as e:
         logger.error(f"Failed to initialize Telegram bot: {e}")
-        return
+        raise SystemExit("Telegram bot initialization failed")
+    
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
     application.add_handler(CommandHandler("totalburn", total_burn_command))
+    
     asyncio.create_task(application.run_polling())
     logger.info("Telegram bot polling started.")
     asyncio.create_task(monitor_burns())
