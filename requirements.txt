@@ -1,7 +1,8 @@
-solana==0.28.1
-python-telegram-bot
-firebase-admin
-websockets
-Flask
-waitress
-
+python-telegram-bot==13.7 
+python-dotenv==1.0.1 
+solana==0.34.3 
+solders==0.21.0 
+websockets==12.0 
+firebase-admin==6.5.0 
+flask==2.3.2 
+waitress==2.1.2
