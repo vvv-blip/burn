@@ -16,10 +16,6 @@ from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
-from firebase_admin import credentials, firestore, initialize_app
-from flask import Flask
-from waitress import serve
-
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -194,7 +190,7 @@ async def monitor_burns():
     logger.info(f"Monitoring burn events for token: {TOKEN_MINT_ADDRESS_STR} (Decimals: {TOKEN_DECIMALS})")
     while True:
         try:
-            async with websockets.connect(SOLANA_WS_URL, ping_interval=20, ping_timeout=20, max_size=2**24) as ws:
+            async with websockets.connect(SOLANA_WS_URL, ping_interval=10, ping_timeout=20, max_size=2**24) as ws:
                 subscribe_request = {
                     "jsonrpc": "2.0",
                     "id": next(_request_id_counter),
@@ -208,8 +204,8 @@ async def monitor_burns():
                 logger.info("Sent logsSubscribe request to WebSocket.")
                 subscribe_response_raw = await ws.recv()
                 subscribe_response = json.loads(subscribe_response_raw)
-                if 'result' in subscribe_response and subscribe_response['result'] is not None:
-                    logger.info(f"Logs subscription confirmed: {subscribe_response['result']}")
+                if 'subscription' in subscribe_response:
+                    logger.info(f"Logs subscription confirmed: {subscribe_response['subscription']}")
                 else:
                     logger.error(f"Failed to subscribe to logs: {subscribe_response.get('error', 'Unknown error')}")
                     continue
@@ -220,11 +216,11 @@ async def monitor_burns():
                             log_info = msg_data['params']['result']['value']
                             signature = log_info['signature']
                             logs = log_info['logs']
-                            err = log_info['err']
+                            err = log_info.get('err')
                             if err:
                                 logger.warning(f"Transaction {signature} failed: {err}. Skipping.")
                                 continue
-                            is_burn_log = any("Program log: Instruction: Burn" in log or "Program log: Instruction: BurnChecked" in log for log in logs)
+                            is_burn_log = any("Program log: Instruction: Burn" in log or "Program log: Instruction: BurnChecked" in log in logs)
                             if is_burn_log:
                                 logger.info(f"Detected potential burn in transaction {signature}. Fetching details.")
                                 await process_solana_transaction(solana_client, signature)
@@ -250,7 +246,7 @@ async def send_telegram_message(message: str):
         return
     try:
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logger.info(f"Telegram message sent: '{message}'")
+        logger.info(f"Telegram message sent to chat {TELEGRAM_CHAT_ID}: '{message}'")
     except TelegramError as e:
         logger.error(f"Error sending Telegram message: {e}")
     except Exception as e:
@@ -258,43 +254,71 @@ async def send_telegram_message(message: str):
 
 def start_command(update: Update, context: CallbackContext):
     """Handles /start command."""
-    update.message.reply_text(
-        "🔥 Welcome to the Solana Burn Monitor Bot! 🔥\n\n"
-        "I monitor token burns for $JEWS on Solana and notify this group.\n\n"
-        "Commands:\n"
-        "• `/totalburn`: View total $JEWS burned.\n"
-        "• `/help`: List all commands.\n"
-        "• `/whomadethebot`: Bot creator info.\n\n"
-        "Let the flames begin! 🚀",
-        parse_mode='Markdown'
-    )
+    try:
+        chat_type = update.message.chat.type
+        chat_id = update.message.chat_id
+        user = update.message.from_user
+        logger.info(f"Received /start command from user @{user.username} (ID: {user.id}) in {chat_type} chat (ID: {chat_id})")
+        update.message.reply_text(
+            "🔥 Welcome to the Solana Burn Monitor Bot! 🔥\n\n"
+            "I monitor token burns for $JEWS on Solana and notify the group.\n\n"
+            "Commands:\n"
+            "• `/totalburn`: View total $JEWS burned.\n"
+            "• `/help`: List all commands.\n"
+            "• `/whomadethebot`: Bot creator info.\n\n"
+            "Let the flames begin! 🚀",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error handling /start command: {e}")
 
 def help_command(update: Update, context: CallbackContext):
     """Handles /help command."""
-    update.message.reply_text(
-        "🔥 Solana Burn Monitor Bot Commands:\n\n"
-        "• `/start`: Welcome message.\n"
-        "• `/totalburn`: Total $JEWS burned.\n"
-        "• `/whomadethebot`: Bot creator.\n",
-        parse_mode='Markdown'
-    )
+    try:
+        chat_type = update.message.chat.type
+        chat_id = update.message.chat_id
+        user = update.message.from_user
+        logger.info(f"Received /help command from user @{user.username} (ID: {user.id}) in {chat_type} chat (ID: {chat_id})")
+        update.message.reply_text(
+            "🔥 Solana Burn Monitor Bot Commands:\n\n"
+            "• `/start`: Welcome message.\n"
+            "• `/totalburn`: Total $JEWS burned.\n"
+            "• `/whomadethebot`: Bot creator.\n",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error handling /help command: {e}")
 
 def whomadethebot_command(update: Update, context: CallbackContext):
     """Handles /whomadethebot command."""
-    update.message.reply_text("@nakatroll")
+    try:
+        chat_type = update.message.chat.type
+        chat_id = update.message.chat_id
+        user = update.message.from_user
+        logger.info(f"Received /whomadethebot command from user @{user.username} (ID: {user.id}) in {chat_type} chat (ID: {chat_id})")
+        update.message.reply_text("@nakatroll")
+    except Exception as e:
+        logger.error(f"Error handling /whomadethebot command: {e}")
 
 def total_burn_command(update: Update, context: CallbackContext):
     """Handles /totalburn command."""
-    async def send_total_burn():
-        total_burned = await get_total_burned_amount()
-        token_symbol = "JEWS"
-        message = (
-            f"🔥 *Burn Status!* 🔥\n\n"
-            f"Total burned ${token_symbol}: *{total_burned:,.{TOKEN_DECIMALS if TOKEN_DECIMALS is not None else 0}f}* 🔥\n"
-            f"Keep the flames roaring! 😼"
-        )
-        update.message.reply_text(message, parse_mode='Markdown')
-    context.job_queue.run_once(lambda _: updater.dispatcher.run_async(send_total_burn), 0)
+    try:
+        chat_type = update.message.chat.type
+        chat_id = update.message.chat_id
+        user = update.message.from_user
+        logger.info(f"Received /totalburn command from user @{user.username} (ID: {user.id}) in {chat_type} chat (ID: {chat_id})")
+        async def send_total_burn():
+            total_burned = await get_total_burned_amount()
+            token_symbol = "JEWS"
+            message = (
+                f"🔥 *Burn Status!* 🔥\n\n"
+                f"Total burned ${token_symbol}: *{total_burned:,.{TOKEN_DECIMALS if TOKEN_DECIMALS is not None else 0}f}* 🔥\n"
+                f"Keep the flames roaring! 😼"
+            )
+            update.message.reply_text(message, parse_mode='Markdown')
+        context.job_queue.run_once(lambda _: updater.dispatcher.run_async(send_total_burn), 0)
+    except Exception as e:
+        logger.error(f"Error handling /totalburn command: {e}")
 
 async def init_bot_components():
     """Initializes Telegram bot and starts async tasks."""
@@ -315,18 +339,23 @@ async def init_bot_components():
     for key, value in env_vars.items():
         logger.info(f"Environment variable {key}: {'set' if value else 'not set'}")
     
-    # Initialize Firebase (optional)
-    initialize_firebase()
-    
     # Initialize Telegram bot
     try:
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         bot_info = await bot.get_me()
         logger.info(f"Telegram bot initialized as @{bot_info.username}")
+        # Check privacy settings (basic check by attempting to get updates)
+        updates = await bot.get_updates()
+        if not updates:
+            logger.warning("No updates received. Ensure bot privacy mode is disabled in @BotFather.")
     except TelegramError as e:
         logger.error(f"Failed to initialize Telegram bot: {e}")
         raise SystemExit("Telegram bot initialization failed")
     
+    # Initialize Firebase (optional)
+    initialize_firebase()
+    
+    # Initialize Telegram Updater
     updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
     dispatcher.add_handler(CommandHandler("start", start_command))
