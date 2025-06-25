@@ -2,13 +2,11 @@
 # Learn more: https://render.com/docs/blueprint
 
 services:
-  - type: web # Changed back to 'web'
+  - type: web
     name: solana-burn-monitor
-    env: python
-    buildCommand: "pip install -r requirements.txt"
-    # Changed startCommand to use waitress to serve the Flask app
-    startCommand: "waitress-serve main:app_flask"
-    port: 10000 # Specify the port Flask will listen on
+    env: docker # Use Docker environment to utilize Dockerfile
+    plan: free
+    dockerCommand: python main.py # Matches Dockerfile CMD
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
@@ -16,11 +14,12 @@ services:
         sync: false
       - key: TOKEN_MINT_ADDRESS
         sync: false
-      - key: SOLANA_RPC_URL
-        value: "https://api.mainnet-beta.solana.com"
-      - key: SOLANA_WS_URL
-        value: "wss://api.mainnet-beta.solana.com"
       - key: GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64
         sync: false
+      - key: SOLANA_RPC_URL
+        value: "https://mainnet.helius-rpc.com/?api-key=<YOUR_HELIUS_API_KEY>"
+      - key: SOLANA_WS_URL
+        value: "wss://mainnet.helius-rpc.com/?api-key=<YOUR_HELIUS_API_KEY>"
+    port: 10000 # Flask port in main.py
+    healthCheckPath: / # Matches Flask health check endpoint
     minInstances: 1
-    healthCheckPath: / # This health check will hit the Flask app's '/' route
