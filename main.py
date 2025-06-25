@@ -64,10 +64,8 @@ def webhook():
 @app_flask.route('/api/totalburn_blockchain', methods=['GET'])
 def api_totalburn_blockchain():
     client = Client(SOLANA_RPC_URL)
-    # Pass as Pubkey if your library version requires it!
     resp = client.get_token_supply(Pubkey.from_string(TOKEN_MINT_ADDRESS_STR))
-    supply_info = resp['result']['value']
-    current_supply = int(supply_info['amount']) / (10 ** int(supply_info['decimals']))
+    current_supply = int(resp.value.amount) / (10 ** resp.value.decimals)
     burned = INITIAL_SUPPLY - current_supply
     return {"total_burned_blockchain": burned}, 200
 
@@ -138,10 +136,8 @@ def whomadethebot_command(update: Update, context: CallbackContext):
 def total_burn_command(update: Update, context: CallbackContext):
     try:
         client = Client(SOLANA_RPC_URL)
-        # Pass as Pubkey if your library version requires it!
         resp = client.get_token_supply(Pubkey.from_string(TOKEN_MINT_ADDRESS_STR))
-        supply_info = resp['result']['value']
-        current_supply = int(supply_info['amount']) / (10 ** int(supply_info['decimals']))
+        current_supply = int(resp.value.amount) / (10 ** resp.value.decimals)
         burned = INITIAL_SUPPLY - current_supply
         token_symbol = "JEWS"
         message = (
