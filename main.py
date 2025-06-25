@@ -5,7 +5,9 @@ import base64
 import logging
 import threading
 import itertools
+import sys
 from typing import Optional
+from urllib.parse import urljoin
 
 from solana.rpc.api import Client
 import websockets
@@ -17,12 +19,17 @@ from telegram.error import TelegramError
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
 from firebase_admin import credentials, firestore, initialize_app
-from flask import Flask
+from flask import Flask, request
 from waitress import serve
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging with immediate flush
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -31,9 +38,11 @@ SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?ap
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "wss://mainnet.helius-rpc.com/?api-key=<YOUR_HELIUS_API_KEY>")
 TOKEN_MINT_ADDRESS_STR = os.getenv("TOKEN_MINT_ADDRESS")
 FIREBASE_SERVICE_ACCOUNT_JSON_BASE64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://solana-burn-monitor.onrender.com")
 
 # Constants
 SPL_TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+WEBHOOK_PATH = "/webhook"
 
 # Global Variables
 db = None  # Firestore client
@@ -52,12 +61,26 @@ app_flask = Flask(__name__)
 @app_flask.route('/')
 def health_check():
     """Health check endpoint for Render."""
+    logger.info("Health check endpoint accessed")
     return "Bot is running and healthy!", 200
+
+@app_flask.route(WEBHOOK_PATH, methods=['POST'])
+def webhook():
+    """Handle Telegram webhook updates."""
+    try:
+        update = Update.de_json(request.get_json(force=True), bot)
+        logger.info(f"Received webhook update: {update}")
+        updater.dispatcher.process_update(update)
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return "Error", 500
 
 # Firebase Functions
 def initialize_firebase():
     """Initializes Firebase Admin SDK for Firestore."""
     global db
+    logger.info("Attempting to initialize Firebase")
     if not FIREBASE_SERVICE_ACCOUNT_JSON_BASE64:
         logger.warning("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64 not set. Firebase will not be initialized.")
         return False
@@ -66,7 +89,7 @@ def initialize_firebase():
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
         db = firestore.client()
-        logger.info("Firebase initialized successfully.")
+        logger.info("Firebase initialized successfully")
         return True
     except Exception as e:
         logger.error(f"Error initializing Firebase: {e}")
@@ -74,6 +97,7 @@ def initialize_firebase():
 
 async def get_total_burned_amount() -> float:
     """Retrieves total burned amount from Firestore or returns 0.0 if unavailable."""
+    logger.info("Fetching total burned amount")
     if not db:
         logger.warning("Firestore not initialized. Returning 0.0 for total burned amount.")
         return 0.0
@@ -83,6 +107,7 @@ async def get_total_burned_amount() -> float:
         if doc.exists:
             amount = doc.to_dict().get("total_burned_amount", 0.0)
             if isinstance(amount, (int, float)):
+                logger.info(f"Retrieved total burned amount: {amount}")
                 return float(amount)
             else:
                 logger.warning(f"Invalid total burned amount in Firestore: {amount}. Returning 0.0.")
@@ -95,6 +120,7 @@ async def get_total_burned_amount() -> float:
 
 async def update_total_burned_amount(amount: float):
     """Updates total burned amount in Firestore."""
+    logger.info(f"Updating total burned amount to {amount}")
     if not db:
         logger.warning("Firestore not initialized. Skipping update of total burned amount.")
         return
@@ -108,6 +134,7 @@ async def update_total_burned_amount(amount: float):
 # Solana Functions
 async def get_token_decimals(solana_client: Client, mint_address: Pubkey) -> Optional[int]:
     """Fetches token decimals for a mint address."""
+    logger.info(f"Fetching token decimals for {mint_address}")
     try:
         response = await asyncio.to_thread(solana_client.get_account_info, mint_address, encoding="jsonParsed")
         if response and response.value:
@@ -125,6 +152,7 @@ async def get_token_decimals(solana_client: Client, mint_address: Pubkey) -> Opt
 async def process_solana_transaction(solana_client: Client, signature: str):
     """Processes a Solana transaction to detect burn events."""
     global TOKEN_DECIMALS, TOKEN_MINT_ADDRESS_STR
+    logger.info(f"Processing transaction: {signature}")
     if TOKEN_DECIMALS is None or TOKEN_MINT_ADDRESS_STR is None:
         logger.warning("Token decimals or mint address not initialized. Skipping transaction.")
         return
@@ -176,10 +204,12 @@ async def process_solana_transaction(solana_client: Client, signature: str):
 async def monitor_burns():
     """Monitors Solana blockchain for burn events via WebSocket."""
     global TOKEN_DECIMALS, TOKEN_MINT_ADDRESS, TOTAL_BURNED_AMOUNT_KEY
+    logger.info("Starting Solana burn monitoring")
     if TOKEN_MINT_ADDRESS_STR:
         try:
             TOKEN_MINT_ADDRESS = Pubkey.from_string(TOKEN_MINT_ADDRESS_STR)
             TOTAL_BURNED_AMOUNT_KEY = f"total_burned_{TOKEN_MINT_ADDRESS_STR.lower()}"
+            logger.info(f"Token mint address set: {TOKEN_MINT_ADDRESS}")
         except Exception as e:
             logger.error(f"Invalid TOKEN_MINT_ADDRESS: {TOKEN_MINT_ADDRESS_STR}. Error: {e}")
             return
@@ -205,11 +235,11 @@ async def monitor_burns():
                     ]
                 }
                 await ws.send(json.dumps(subscribe_request))
-                logger.info("Sent logsSubscribe request to WebSocket.")
+                logger.info("Sent logsSubscribe request to WebSocket")
                 subscribe_response_raw = await ws.recv()
                 subscribe_response = json.loads(subscribe_response_raw)
-                if 'subscription' in subscribe_response:
-                    logger.info(f"Logs subscription confirmed: {subscribe_response['subscription']}")
+                if 'result' in subscribe_response:
+                    logger.info(f"Logs subscription confirmed: {subscribe_response['result']}")
                 else:
                     logger.error(f"Failed to subscribe to logs: {subscribe_response.get('error', 'Unknown error')}")
                     continue
@@ -245,6 +275,7 @@ async def monitor_burns():
 async def send_telegram_message(message: str):
     """Sends a message to the Telegram chat."""
     global bot
+    logger.info(f"Attempting to send Telegram message: {message}")
     if not bot or not TELEGRAM_CHAT_ID:
         logger.error("Telegram Bot or Chat ID not initialized. Cannot send message.")
         return
@@ -327,59 +358,66 @@ def total_burn_command(update: Update, context: CallbackContext):
 async def init_bot_components():
     """Initializes Telegram bot and starts async tasks."""
     global bot, updater
-    # Enhanced environment variable validation
+    logger.info("Starting bot component initialization")
+    # Environment variable validation
     env_vars = {
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
         "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
         "TOKEN_MINT_ADDRESS": TOKEN_MINT_ADDRESS_STR,
         "GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64": FIREBASE_SERVICE_ACCOUNT_JSON_BASE64,
         "SOLANA_RPC_URL": SOLANA_RPC_URL,
-        "SOLANA_WS_URL": SOLANA_WS_URL
+        "SOLANA_WS_URL": SOLANA_WS_URL,
+        "RENDER_EXTERNAL_URL": RENDER_EXTERNAL_URL
     }
-    missing_vars = [key for key, value in env_vars.items() if not value]
-    if missing_vars:
-        logger.critical(f"Missing environment variables: {missing_vars}. Bot cannot start.")
-        raise SystemExit(f"Missing environment variables: {missing_vars}")
-    for key, value in env_vars.items():
-        logger.info(f"Environment variable {key}: {'set' if value else 'not set'}")
-    
-    # Initialize Telegram bot
     try:
+        for key, value in env_vars.items():
+            logger.info(f"Environment variable {key}: {'set' if value else 'not set'}")
+        missing_vars = [key for key, value in env_vars.items() if not value]
+        if missing_vars:
+            logger.critical(f"Missing environment variables: {missing_vars}. Bot cannot start.")
+            raise SystemExit(f"Missing environment variables: {missing_vars}")
+        
+        # Initialize Telegram bot
+        logger.info("Initializing Telegram bot")
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         bot_info = await bot.get_me()
         logger.info(f"Telegram bot initialized as @{bot_info.username}")
-        # Check privacy settings
-        updates = await bot.get_updates()
-        if not updates:
-            logger.warning("No updates received. Ensure bot privacy mode is disabled in @BotFather.")
-    except TelegramError as e:
-        logger.error(f"Failed to initialize Telegram bot: {e}")
-        raise SystemExit("Telegram bot initialization failed")
-    
-    # Initialize Firebase (optional)
-    initialize_firebase()
-    
-    # Initialize Telegram Updater
-    updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
-    dispatcher.add_handler(CommandHandler("start", start_command))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
-    dispatcher.add_handler(CommandHandler("totalburn", total_burn_command))
-    
-    updater.start_polling()
-    logger.info("Telegram bot polling started.")
-    asyncio.create_task(monitor_burns())
-    logger.info("Solana burn monitoring started.")
+        
+        # Attempt webhook setup
+        logger.info("Setting up Telegram webhook")
+        webhook_url = urljoin(RENDER_EXTERNAL_URL, WEBHOOK_PATH)
+        await bot.delete_webhook()  # Clear any existing webhook
+        await bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook set to {webhook_url}")
+        
+        # Initialize Firebase
+        logger.info("Initializing Firebase")
+        initialize_firebase()
+        
+        # Initialize Telegram Updater
+        logger.info("Initializing Telegram Updater")
+        updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
+        dispatcher = updater.dispatcher
+        dispatcher.add_handler(CommandHandler("start", start_command))
+        dispatcher.add_handler(CommandHandler("help", help_command))
+        dispatcher.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
+        dispatcher.add_handler(CommandHandler("totalburn", total_burn_command))
+        
+        logger.info("Starting Solana burn monitoring")
+        asyncio.create_task(monitor_burns())
+    except Exception as e:
+        logger.error(f"Error in init_bot_components: {e}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
-    logger.info("Starting Flask web service and bot tasks.")
+    logger.info("Starting main application")
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    loop.create_task(init_bot_components())
-    port = int(os.getenv("PORT", 10000))
-    logger.info(f"Flask web service starting on port {port}")
-    serve(app_flask, host="0.0.0.0", port=port)
+        loop.create_task(init_bot_components())
+        port = int(os.getenv("PORT", 10000))
+        logger.info(f"Starting Flask web service on port {port}")
+        serve(app_flask, host="0.0.0.0", port=port)
+    except Exception as e:
+        logger.error(f"Error in main block: {e}", exc_info=True)
+        raise
