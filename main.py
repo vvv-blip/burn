@@ -104,9 +104,9 @@ def start_command(update: Update, context: CallbackContext):
     try:
         update.message.reply_text(
             "🔥* Welcome to GOY ARMY $JEWS burner program *🔥\n\n"
-            "I monitor $JEWS burns on Solana a.\n\n"
-            "Commands:\n"
-            "• `/totalburn`: View total $JEWS burned (from blockchain)\n"
+            "I monitor $JEWS burns on Solana.\n\n"
+            "Command:\n"
+            "• `/totalburn`: View total $JEWS burned (from blockchain)\n\n"
             "* NIGGA HEIL HITLER- Kanye West * ",
             parse_mode='Markdown'
         )
