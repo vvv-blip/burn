@@ -16,6 +16,10 @@ from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
+from firebase_admin import credentials, firestore, initialize_app
+from flask import Flask
+from waitress import serve
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -220,7 +224,7 @@ async def monitor_burns():
                             if err:
                                 logger.warning(f"Transaction {signature} failed: {err}. Skipping.")
                                 continue
-                            is_burn_log = any("Program log: Instruction: Burn" in log or "Program log: Instruction: BurnChecked" in log in logs)
+                            is_burn_log = any("Program log: Instruction: Burn" in log or "Program log: Instruction: BurnChecked" in log for log in logs)
                             if is_burn_log:
                                 logger.info(f"Detected potential burn in transaction {signature}. Fetching details.")
                                 await process_solana_transaction(solana_client, signature)
@@ -344,7 +348,7 @@ async def init_bot_components():
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         bot_info = await bot.get_me()
         logger.info(f"Telegram bot initialized as @{bot_info.username}")
-        # Check privacy settings (basic check by attempting to get updates)
+        # Check privacy settings
         updates = await bot.get_updates()
         if not updates:
             logger.warning("No updates received. Ensure bot privacy mode is disabled in @BotFather.")
