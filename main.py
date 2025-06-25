@@ -5,7 +5,7 @@ import base64
 import logging
 import threading
 import itertools # Used for unique request IDs
-from typing import Optional # NEW: Import Optional for type hinting
+from typing import Optional
 
 from solana.rpc.api import Client
 import websockets # Import websockets directly
@@ -17,6 +17,10 @@ from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from firebase_admin import credentials, firestore, initialize_app
+
+# --- New: Flask imports and instance ---
+from flask import Flask # Import Flask for the web service part
+from waitress import serve # For serving the Flask app in production
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,6 +48,15 @@ TOTAL_BURNED_AMOUNT_KEY = "default_total_burned_token"
 total_burned_lock = threading.Lock()
 # Counter for WebSocket JSON-RPC request IDs
 _request_id_counter = itertools.count(1)
+
+# --- Flask app instance for web service functionality ---
+app_flask = Flask(__name__)
+
+# A simple route for Render's health checks or Uptime Robot
+@app_flask.route('/')
+def health_check():
+    """A simple health check endpoint."""
+    return "Bot is running and healthy!", 200
 
 # --- Firebase Functions ---
 def initialize_firebase():
@@ -106,7 +119,6 @@ async def update_total_burned_amount(amount: float):
         logger.error(f"Error updating total burned amount in Firestore: {e}")
 
 # --- Solana Functions ---
-# Changed: Use Optional[int] for type hinting
 async def get_token_decimals(solana_client: Client, mint_address: Pubkey) -> Optional[int]:
     """
     Fetches the number of decimals for a given token mint address.
@@ -249,7 +261,6 @@ async def monitor_burns():
                     logger.info(f"Received logsSubscribe confirmation: {subscribe_response['result']}")
                 else:
                     logger.error(f"Failed to subscribe to logs: {subscribe_response.get('error', 'Unknown error')}")
-                    # If subscription fails, close and retry connection
                     continue
 
                 # Process incoming WebSocket messages (logs)
@@ -289,7 +300,7 @@ async def monitor_burns():
             logger.error(f"WebSocket connection error: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
-# --- Telegram Functions ---
+# --- Telegram Command Handlers ---
 async def send_telegram_message(message: str):
     """
     Sends a message to the configured Telegram chat.
@@ -350,20 +361,20 @@ async def total_burn_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     await update.message.reply_text(message, parse_mode='Markdown')
 
-
-async def run_bot():
+async def init_bot_components():
     """
-    Initializes and runs the Telegram bot.
+    Initializes Telegram bot components and starts async tasks.
+    This function will be called once when the Flask app starts.
     """
     global bot, application
 
     # Check for essential environment variables
     if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TOKEN_MINT_ADDRESS_STR, FIREBASE_SERVICE_ACCOUNT_JSON_BASE64]):
-        logger.error("Missing one or more required environment variables (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TOKEN_MINT_ADDRESS, GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64). Please check your .env file or Render environment settings. Exiting.")
-        return
+        logger.error("Missing one or more required environment variables (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TOKEN_MINT_ADDRESS, GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64). Bot will not start fully.")
+        return # Do not proceed if critical env vars are missing
 
     if not initialize_firebase():
-        logger.error("Firebase initialization failed. Cannot proceed. Exiting.")
+        logger.error("Firebase initialization failed. Bot will not start fully.")
         return
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -371,10 +382,10 @@ async def run_bot():
         bot_info = await bot.get_me()
         logger.info(f"Telegram bot initialized successfully as @{bot_info.username}")
     except TelegramError as e:
-        logger.error(f"Failed to initialize Telegram bot. Check TELEGRAM_BOT_TOKEN validity: {e}")
+        logger.error(f"Failed to initialize Telegram bot. Check TELEGRAM_BOT_TOKEN validity: {e}. Bot will not start fully.")
         return
     except Exception as e:
-        logger.error(f"Unexpected error during Telegram bot initialization: {e}")
+        logger.error(f"Unexpected error during Telegram bot initialization: {e}. Bot will not start fully.")
         return
 
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -384,17 +395,34 @@ async def run_bot():
     application.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
     application.add_handler(CommandHandler("totalburn", total_burn_command))
 
+    # Start Telegram polling and Solana monitoring as concurrent asyncio tasks
     asyncio.create_task(application.run_polling())
-    logger.info("Telegram bot polling started.")
+    logger.info("Telegram bot polling task scheduled.")
+    asyncio.create_task(monitor_burns())
+    logger.info("Solana burn monitoring task scheduled.")
 
-    await monitor_burns()
-
-
+# Entry point for the application when run by Waitress
 if __name__ == "__main__":
+    logger.info("Starting Flask web service and scheduling Telegram bot background tasks.")
+    
+    # Initialize the asyncio event loop if not already running (for background tasks)
+    # This ensures Flask can run in the main thread while asyncio tasks run concurrently.
     try:
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped manually by KeyboardInterrupt.")
-    except Exception as e:
-        logger.critical(f"An unhandled critical error occurred, bot is stopping: {e}", exc_info=True)
+        loop = asyncio.get_running_loop()
+    except RuntimeError: # No running event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    # Schedule the bot's async initialization and operation as a task
+    # This will run in the background as the Flask server starts.
+    loop.create_task(init_bot_components())
+
+    # Get the port from the environment provided by Render (defaulting to 10000)
+    port = int(os.getenv("PORT", 10000))
+    logger.info(f"Flask web service starting on port {port}")
+    
+    # Serve the Flask app with Waitress
+    # The 'host="0.0.0.0"' makes it accessible externally within the container.
+    # The asyncio tasks scheduled above will run concurrently.
+    serve(app_flask, host="0.0.0.0", port=port)
 
