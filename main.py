@@ -110,6 +110,11 @@ async def send_telegram_message(message: str):
 
 def start_command(update: Update, context: CallbackContext):
     try:
+        # Send the GIF first
+        context.bot.send_animation(
+            chat_id=update.effective_chat.id,
+            animation="https://giphy.com/gifs/OMYKYMa53NVbKBWvJY"
+        )
         update.message.reply_text(
             "🔥 *Welcome to GOY ARMY $JEWS burner program*  🔥\n\n"
             "I monitor $JEWS burns on Solana..\n\n"
