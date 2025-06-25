@@ -185,7 +185,12 @@ async def monitor_burns():
                 sig = tx.signature
                 if sig == last_signature:
                     break
-                tx_data = client.get_transaction(sig, encoding="jsonParsed")
+                # Fix: Pass max_supported_transaction_version=0!
+                tx_data = client.get_transaction(
+                    sig,
+                    encoding="jsonParsed",
+                    max_supported_transaction_version=0
+                )
                 if tx_data.value is None or not isinstance(tx_data.value, dict):
                     continue
                 meta = tx_data.value.get("meta")
