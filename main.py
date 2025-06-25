@@ -241,15 +241,14 @@ async def init_bot_components():
     # Initialize Telegram bot and dispatcher
     logger.info("Initializing Telegram bot")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    # --------- FIXED LINE BELOW (removed await) -------------
     bot_info = bot.get_me()
     logger.info(f"Telegram bot initialized as @{bot_info.username}")
 
     # Set the webhook
     logger.info("Setting up Telegram webhook")
     webhook_url = urljoin(RENDER_EXTERNAL_URL, WEBHOOK_PATH)
-    await bot.delete_webhook()
-    result = await bot.set_webhook(url=webhook_url)
+    bot.delete_webhook()
+    result = bot.set_webhook(url=webhook_url)
     logger.info(f"Webhook set to {webhook_url}: {result}")
 
     # Firebase
