@@ -5,14 +5,14 @@ FROM python:3.9-slim-buster
 WORKDIR /app
 
 # Copy the requirements file and install dependencies
-# --no-cache-dir: Do not use the pip cache, reduces image size
-# -r requirements.txt: Install packages listed in requirements.txt
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of your application code into the container
 COPY . .
 
-# Command to run the application when the container starts
-# This will execute your main.py script
+# Expose port 10000 for Flask
+EXPOSE 10000
+
+# Command to run the application
 CMD ["python", "main.py"]
