@@ -243,7 +243,8 @@ async def monitor_burns():
 
 # Telegram Functions
 async def send_telegram_message(message: str):
-    """Sends a message to the Telegram chat isotherms    global bot
+    """Sends a message to the Telegram chat."""
+    global bot
     if not bot or not TELEGRAM_CHAT_ID:
         logger.error("Telegram Bot or Chat ID not initialized. Cannot send message.")
         return
