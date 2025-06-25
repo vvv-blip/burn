@@ -5,13 +5,13 @@ import base64
 import logging
 import threading
 import itertools # Used for unique request IDs
+from typing import Optional # NEW: Import Optional for type hinting
+
 from solana.rpc.api import Client
 import websockets # Import websockets directly
-# Removed: from solana.rpc.websocket_api import logs_subscribe
 from solders.pubkey import Pubkey
 from solders.rpc.config import RpcTransactionConfig, RpcTransactionLogsConfig
 
-# Changed: Only import what's directly needed for telegram.ext
 from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -106,7 +106,8 @@ async def update_total_burned_amount(amount: float):
         logger.error(f"Error updating total burned amount in Firestore: {e}")
 
 # --- Solana Functions ---
-async def get_token_decimals(solana_client: Client, mint_address: Pubkey) -> int | None:
+# Changed: Use Optional[int] for type hinting
+async def get_token_decimals(solana_client: Client, mint_address: Pubkey) -> Optional[int]:
     """
     Fetches the number of decimals for a given token mint address.
     """
