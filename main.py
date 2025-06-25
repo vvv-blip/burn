@@ -4,36 +4,33 @@ import json
 import base64
 import logging
 import threading
+import itertools # Used for unique request IDs
 from solana.rpc.api import Client
-# Changed: Import websockets directly instead of SolanaWsClient
-import websockets
-from solana.rpc.websocket_api import logs_subscribe # logs_subscribe is still used from solana.rpc.websocket_api
+import websockets # Import websockets directly
+# Removed: from solana.rpc.websocket_api import logs_subscribe
 from solders.pubkey import Pubkey
 from solders.rpc.config import RpcTransactionConfig, RpcTransactionLogsConfig
+
+# Changed: Only import what's directly needed for telegram.ext
 from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+from firebase_admin import credentials, firestore, initialize_app
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__) # Define a logger instance
 
 # --- Environment Variables ---
-# Telegram Bot Token (obtained from BotFather)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# Telegram Chat ID where messages will be sent
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# Solana RPC URL (e.g., "https://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-# Solana WebSocket URL (e.g., "wss://api.mainnet-beta.solana.com")
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "wss://api.mainnet-beta.solana.com")
-# The public key of the token mint to monitor for burns
 TOKEN_MINT_ADDRESS_STR = os.getenv("TOKEN_MINT_ADDRESS")
-# Base64 encoded Firebase service account key JSON
 FIREBASE_SERVICE_ACCOUNT_JSON_BASE64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64")
 
 # --- Constants ---
-# The Pubkey for the SPL Token Program (constant across Solana)
 SPL_TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 
 # --- Global Variables ---
@@ -42,14 +39,11 @@ bot = None  # Telegram bot instance
 application = None # Telegram Application instance for command handlers
 TOKEN_MINT_ADDRESS = None  # Parsed Pubkey of the token mint
 TOKEN_DECIMALS = None  # Number of decimals for the token
-# Firestore document ID for storing the total burned amount.
-# This will be dynamically generated based on the token mint address.
 TOTAL_BURNED_AMOUNT_KEY = "default_total_burned_token"
 
-# Lock for synchronizing updates to the total_burned_amount in memory if multiple
-# concurrent processes were updating it, though Firestore handles persistence atomicity.
-# Primarily for ensuring data consistency if accessing from multiple async tasks locally.
 total_burned_lock = threading.Lock()
+# Counter for WebSocket JSON-RPC request IDs
+_request_id_counter = itertools.count(1)
 
 # --- Firebase Functions ---
 def initialize_firebase():
@@ -59,7 +53,6 @@ def initialize_firebase():
         logger.error("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64 environment variable not set. Firebase cannot be initialized.")
         return False
     try:
-        # Decode the base64 string to get the service account JSON
         service_account_info = json.loads(base64.b64decode(FIREBASE_SERVICE_ACCOUNT_JSON_BASE64).decode('utf-8'))
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
@@ -80,15 +73,12 @@ async def get_total_burned_amount() -> float:
         return 0.0
     try:
         doc_ref = db.collection("token_burn_stats").document(TOTAL_BURNED_AMOUNT_KEY)
-        # Run synchronous Firestore get operation in a separate thread to avoid blocking the event loop
         doc = await asyncio.to_thread(doc_ref.get)
         if doc.exists:
-            # Firestore stores numbers directly. If it was stored as a string, convert it.
-            # Assuming it's stored as a float now.
             amount = doc.to_dict().get("total_burned_amount", 0.0)
             if isinstance(amount, (int, float)):
                 return float(amount)
-            else: # Fallback for cases where it might be a string from previous storage
+            else:
                 try:
                     return float(str(amount))
                 except ValueError:
@@ -110,7 +100,6 @@ async def update_total_burned_amount(amount: float):
         return
     try:
         doc_ref = db.collection("token_burn_stats").document(TOTAL_BURNED_AMOUNT_KEY)
-        # Store as a number directly in Firestore
         await asyncio.to_thread(doc_ref.set, {"total_burned_amount": amount})
         logger.info(f"Total burned amount in Firestore updated to {amount}")
     except Exception as e:
@@ -122,11 +111,8 @@ async def get_token_decimals(solana_client: Client, mint_address: Pubkey) -> int
     Fetches the number of decimals for a given token mint address.
     """
     try:
-        # Fetch account information for the token mint.
-        # Using jsonParsed encoding to get structured data back.
         response = await asyncio.to_thread(solana_client.get_account_info, mint_address, encoding="jsonParsed")
         if response and response.value:
-            # The parsed data contains the mint's info, including decimals.
             mint_data = response.value.data.parsed["info"]
             if mint_data["type"] == "mint":
                 decimals = mint_data["decimals"]
@@ -149,13 +135,11 @@ async def process_solana_transaction(solana_client: Client, signature: str):
         return
 
     try:
-        # Configuration for fetching the transaction, requesting jsonParsed encoding
-        # to easily access structured instruction data.
         config = RpcTransactionConfig(
             encoding="jsonParsed",
-            max_supported_transaction_version=0, # Use 0 for legacy transactions, adjust if monitoring v1+
+            max_supported_transaction_version=0,
             rewards=False,
-            commitment="confirmed" # "confirmed" ensures the transaction is on a confirmed block
+            commitment="confirmed"
         )
         transaction_response = await asyncio.to_thread(solana_client.get_transaction, signature, config)
 
@@ -167,20 +151,15 @@ async def process_solana_transaction(solana_client: Client, signature: str):
         burned_amount_raw = 0
         is_burn_event = False
 
-        # Iterate through the main instructions in the transaction
-        # `jsonParsed` transactions will have instructions with a `parsed` attribute
-        # for known programs like SPL Token.
         for instruction in tx.transaction.message.instructions:
-            # Check if it's an SPL Token program instruction and if it's a burn type
             if hasattr(instruction, 'parsed') and instruction.program_id == SPL_TOKEN_PROGRAM_ID:
                 parsed_info = instruction.parsed.get('info', {})
                 if instruction.parsed.get('type') in ['burn', 'burnChecked'] and \
                    parsed_info.get('mint') == TOKEN_MINT_ADDRESS_STR:
                     burned_amount_raw = int(parsed_info.get('amount', 0))
                     is_burn_event = True
-                    break # Found the relevant burn instruction, no need to check further
+                    break
 
-        # Also check inner instructions (instructions called by other instructions)
         if not is_burn_event and tx.meta and tx.meta.inner_instructions:
             for inner_instruction_list in tx.meta.inner_instructions:
                 for instruction in inner_instruction_list.instructions:
@@ -195,17 +174,14 @@ async def process_solana_transaction(solana_client: Client, signature: str):
                     break
 
         if is_burn_event and burned_amount_raw > 0:
-            # Convert the raw amount (in lamports) to human-readable format using token decimals
             burned_amount_readable = burned_amount_raw / (10**TOKEN_DECIMALS)
             logger.info(f"Detected burn of {burned_amount_readable} tokens (raw: {burned_amount_raw}). Signature: {signature}")
 
-            # Update the total burned amount in Firestore
             with total_burned_lock:
                 current_total_burned = await get_total_burned_amount()
                 new_total_burned = current_total_burned + burned_amount_readable
                 await update_total_burned_amount(new_total_burned)
 
-            # For simplicity, using "JEWS" as requested previously.
             token_symbol = "JEWS"
             message = (
                 f"🔥 Someone burned {burned_amount_readable:,.{TOKEN_DECIMALS}f} ${token_symbol}!\n"
@@ -224,11 +200,9 @@ async def monitor_burns():
     """
     global TOKEN_DECIMALS, TOKEN_MINT_ADDRESS, TOTAL_BURNED_AMOUNT_KEY
 
-    # Validate and parse the token mint address
     if TOKEN_MINT_ADDRESS_STR:
         try:
             TOKEN_MINT_ADDRESS = Pubkey.from_string(TOKEN_MINT_ADDRESS_STR)
-            # Use the token mint address to create a specific key for Firestore
             TOTAL_BURNED_AMOUNT_KEY = f"total_burned_{TOKEN_MINT_ADDRESS_STR.lower()}"
         except Exception as e:
             logger.error(f"Invalid TOKEN_MINT_ADDRESS: {TOKEN_MINT_ADDRESS_STR}. Error: {e}")
@@ -237,10 +211,8 @@ async def monitor_burns():
         logger.error("TOKEN_MINT_ADDRESS environment variable not set. Exiting monitoring.")
         return
 
-    # Initialize Solana RPC client
     solana_client = Client(SOLANA_RPC_URL)
 
-    # Fetch token decimals once at startup
     TOKEN_DECIMALS = await get_token_decimals(solana_client, TOKEN_MINT_ADDRESS)
     if TOKEN_DECIMALS is None:
         logger.error(f"Failed to retrieve decimals for token mint {TOKEN_MINT_ADDRESS_STR}. Cannot monitor burns without decimals. Exiting.")
@@ -249,40 +221,50 @@ async def monitor_burns():
     logger.info(f"Starting to monitor burn events for token: {TOKEN_MINT_ADDRESS_STR} (Decimals: {TOKEN_DECIMALS})")
     logger.info(f"Using Solana RPC: {SOLANA_RPC_URL} and WebSocket: {SOLANA_WS_URL}")
 
-    # Main loop for WebSocket connection and re-connection
     while True:
         try:
-            # Changed: Use websockets.connect directly
             async with websockets.connect(SOLANA_WS_URL) as ws:
-                # Subscribe to logs using the solana.py function, passing the direct websocket connection
-                await logs_subscribe(
-                    ws, # Pass the raw websocket connection
-                    filter_=RpcTransactionLogsConfig(
-                        mentions=[SPL_TOKEN_PROGRAM_ID], # Filter logs mentioning the SPL Token Program
-                        commitment="confirmed" # Listen for logs on confirmed blocks
-                    )
-                )
+                # Manually construct the logsSubscribe JSON-RPC request
+                subscribe_request = {
+                    "jsonrpc": "2.0",
+                    "id": next(_request_id_counter), # Unique ID for the request
+                    "method": "logsSubscribe",
+                    "params": [
+                        {
+                            "mentions": [str(SPL_TOKEN_PROGRAM_ID)] # Pubkey needs to be a string
+                        },
+                        {
+                            "commitment": "confirmed"
+                        }
+                    ]
+                }
+                await ws.send(json.dumps(subscribe_request))
+                logger.info("Sent logsSubscribe request to WebSocket.")
 
-                logger.info("Subscribed to SPL Token Program logs via WebSocket.")
+                # Wait for the subscription confirmation response
+                subscribe_response_raw = await ws.recv()
+                subscribe_response = json.loads(subscribe_response_raw)
+                if 'result' in subscribe_response and subscribe_response['result'] is not None:
+                    logger.info(f"Received logsSubscribe confirmation: {subscribe_response['result']}")
+                else:
+                    logger.error(f"Failed to subscribe to logs: {subscribe_response.get('error', 'Unknown error')}")
+                    # If subscription fails, close and retry connection
+                    continue
 
-                # Process incoming WebSocket messages
-                async for msg in ws:
+                # Process incoming WebSocket messages (logs)
+                async for msg_raw in ws:
                     try:
-                        # The structure of the message from websockets.connect and logs_subscribe might be slightly different
-                        # from what SolanaWsClient would automatically parse. Need to re-parse.
-                        msg_data = json.loads(msg) # Parse the raw JSON string received from the websocket
+                        msg_data = json.loads(msg_raw)
                         if msg_data and 'params' in msg_data and 'result' in msg_data['params'] and 'value' in msg_data['params']['result']:
                             log_info = msg_data['params']['result']['value']
                             signature = log_info['signature']
                             logs = log_info['logs']
                             err = log_info['err']
 
-                            # Skip transactions that failed
                             if err:
                                 logger.warning(f"Transaction {signature} failed with error: {err}. Skipping.")
                                 continue
 
-                            # Check if any log message indicates a "Burn" or "BurnChecked" instruction.
                             is_burn_log = False
                             for log in logs:
                                 if "Program log: Instruction: Burn" in log or "Program log: Instruction: BurnChecked" in log:
@@ -296,12 +278,15 @@ async def monitor_burns():
                                 logger.debug(f"Skipping non-burn related logs for signature: {signature}")
 
                     except json.JSONDecodeError as jde:
-                        logger.error(f"Failed to decode WebSocket message JSON: {jde}. Message: {msg}")
+                        logger.error(f"Failed to decode WebSocket message JSON: {jde}. Message: {msg_raw}")
                     except Exception as e:
                         logger.error(f"Error processing individual WebSocket message: {e}")
+        except websockets.exceptions.ConnectionClosed as cc:
+            logger.warning(f"WebSocket connection closed unexpectedly: {cc}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}. Reconnecting in 5 seconds...")
-            await asyncio.sleep(5) # Wait before attempting to reconnect
+            await asyncio.sleep(5)
 
 # --- Telegram Functions ---
 async def send_telegram_message(message: str):
@@ -355,7 +340,6 @@ async def total_burn_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Handles the /totalburn command, showing the total amount of tokens burned."""
     total_burned = await get_total_burned_amount()
     
-    # Use "JEWS" as the token symbol as requested previously
     token_symbol = "JEWS" 
 
     message = (
@@ -377,12 +361,10 @@ async def run_bot():
         logger.error("Missing one or more required environment variables (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TOKEN_MINT_ADDRESS, GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64). Please check your .env file or Render environment settings. Exiting.")
         return
 
-    # Initialize Firebase Admin SDK
     if not initialize_firebase():
         logger.error("Firebase initialization failed. Cannot proceed. Exiting.")
         return
 
-    # Initialize Telegram Bot
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     try:
         bot_info = await bot.get_me()
@@ -394,28 +376,21 @@ async def run_bot():
         logger.error(f"Unexpected error during Telegram bot initialization: {e}")
         return
 
-    # Build the Application instance for command handling
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
     application.add_handler(CommandHandler("totalburn", total_burn_command))
 
-    # Start polling for Telegram updates in a background task
-    # This keeps the Telegram bot active and listening for commands
     asyncio.create_task(application.run_polling())
     logger.info("Telegram bot polling started.")
 
-    # Start the continuous burn monitoring process
     await monitor_burns()
 
 
 if __name__ == "__main__":
-    # Run the main asynchronous function
     try:
-        # Start both the Telegram bot polling and the Solana monitoring loop concurrently
         asyncio.run(run_bot())
     except KeyboardInterrupt:
         logger.info("Bot stopped manually by KeyboardInterrupt.")
