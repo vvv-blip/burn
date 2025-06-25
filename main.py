@@ -113,7 +113,7 @@ def start_command(update: Update, context: CallbackContext):
         # Send the GIF first
         context.bot.send_animation(
             chat_id=update.effective_chat.id,
-            animation="https://giphy.com/gifs/OMYKYMa53NVbKBWvJY"
+            animation="https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExeHRxNGFjd2VpZ2psbDkydWM5NXY5YmRsMnF3dnd6YnJzM3dmZG5peiZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/OMYKYMa53NVbKBWvJY/giphy.gif"
         )
         update.message.reply_text(
             "🔥 *Welcome to GOY ARMY $JEWS burner program*  🔥\n\n"
