@@ -103,13 +103,11 @@ async def send_telegram_message(message: str):
 def start_command(update: Update, context: CallbackContext):
     try:
         update.message.reply_text(
-            "🔥 Welcome to the Solana Burn Monitor Bot! 🔥\n\n"
-            "I monitor token burns for $JEWS on Solana and notify the group.\n\n"
+            "🔥* Welcome to GOY ARMY $JEWS burner program *🔥\n\n"
+            "I monitor $JEWS burns on Solana a.\n\n"
             "Commands:\n"
             "• `/totalburn`: View total $JEWS burned (from blockchain)\n"
-            "• `/help`: List all commands.\n"
-            "• `/whomadethebot`: Bot creator info.\n\n"
-            "Let the flames begin! 🚀",
+            "* NIGGA HEIL HITLER- Kanye West * ",
             parse_mode='Markdown'
         )
     except Exception as e:
@@ -141,7 +139,7 @@ def total_burn_command(update: Update, context: CallbackContext):
         burned = INITIAL_SUPPLY - current_supply
         token_symbol = "JEWS"
         message = (
-            f"🔥 *Total Burned (from Blockchain)* 🔥\n\n"
+            f"🔥 *Total $JEWS Burned* 🔥\n\n"
             f"Total burned ${token_symbol}: *{burned:,.2f}* 🔥\n"
             f"(since inception, on-chain)"
         )
@@ -212,7 +210,7 @@ async def monitor_burns():
             for sig, burned in reversed(new_burns):
                 link = f"https://solscan.io/tx/{sig}"
                 await send_telegram_message(
-                    f"🔥 *Token Burned!* 🔥\n\n"
+                    f"🔥 *$JEWS Burned!* 🔥\n\n"
                     f"Amount: *{burned:,.{TOKEN_DECIMALS}f}* $JEWS\n"
                     f"[View Transaction]({link})"
                 )
