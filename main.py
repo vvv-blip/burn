@@ -36,6 +36,9 @@ WEBHOOK_PATH = "/webhook"
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "9"))
 BURN_ADDRESS = "11111111111111111111111111111111"
 
+# Blockchain supply config
+INITIAL_SUPPLY = 15800000  # <-- Your token's initial supply (change if needed)
+
 db = None
 bot = None
 dispatcher = None
@@ -56,6 +59,16 @@ def webhook():
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
         return "Error", 500
+
+# --- Blockchain-aware total burn API endpoint ---
+@app_flask.route('/api/totalburn_blockchain', methods=['GET'])
+def api_totalburn_blockchain():
+    client = Client(SOLANA_RPC_URL)
+    resp = client.get_token_supply(TOKEN_MINT_ADDRESS_STR)
+    supply_info = resp['result']['value']
+    current_supply = int(supply_info['amount']) / (10 ** int(supply_info['decimals']))
+    burned = INITIAL_SUPPLY - current_supply
+    return {"total_burned_blockchain": burned}, 200
 
 def initialize_firebase():
     global db
@@ -94,7 +107,7 @@ def start_command(update: Update, context: CallbackContext):
             "🔥 Welcome to the Solana Burn Monitor Bot! 🔥\n\n"
             "I monitor token burns for $JEWS on Solana and notify the group.\n\n"
             "Commands:\n"
-            "• `/totalburn`: View total $JEWS burned.\n"
+            "• `/totalburn`: View total $JEWS burned (from blockchain)\n"
             "• `/help`: List all commands.\n"
             "• `/whomadethebot`: Bot creator info.\n\n"
             "Let the flames begin! 🚀",
@@ -108,7 +121,7 @@ def help_command(update: Update, context: CallbackContext):
         update.message.reply_text(
             "🔥 Solana Burn Monitor Bot Commands:\n\n"
             "• `/start`: Welcome message.\n"
-            "• `/totalburn`: Total $JEWS burned.\n"
+            "• `/totalburn`: Blockchain-based total $JEWS burned.\n"
             "• `/whomadethebot`: Bot creator.\n",
             parse_mode='Markdown'
         )
@@ -123,16 +136,21 @@ def whomadethebot_command(update: Update, context: CallbackContext):
 
 def total_burn_command(update: Update, context: CallbackContext):
     try:
-        total_burned = get_total_burned_amount_local()
+        client = Client(SOLANA_RPC_URL)
+        resp = client.get_token_supply(TOKEN_MINT_ADDRESS_STR)
+        supply_info = resp['result']['value']
+        current_supply = int(supply_info['amount']) / (10 ** int(supply_info['decimals']))
+        burned = INITIAL_SUPPLY - current_supply
         token_symbol = "JEWS"
         message = (
-            f"🔥 *Burn Status!* 🔥\n\n"
-            f"Total burned ${token_symbol}: *{total_burned:,.{TOKEN_DECIMALS}f}* 🔥\n"
-            f"Keep the flames roaring! 😼"
+            f"🔥 *Total Burned (from Blockchain)* 🔥\n\n"
+            f"Total burned ${token_symbol}: *{burned:,.2f}* 🔥\n"
+            f"(since inception, on-chain)"
         )
         update.message.reply_text(message, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Error handling /totalburn command: {e}")
+        update.message.reply_text("Error fetching blockchain burn data.")
 
 def setup_dispatcher(bot_instance):
     disp = Dispatcher(bot_instance, None, workers=0, use_context=True)
@@ -142,30 +160,13 @@ def setup_dispatcher(bot_instance):
     disp.add_handler(CommandHandler("totalburn", total_burn_command))
     return disp
 
+# The following functions are retained for monitoring and storage,
+# but /totalburn now always uses the blockchain, not historical tracked value.
 def get_total_burned_amount_local():
-    try:
-        if db:
-            doc_ref = db.collection("token_burn_stats").document("default_total_burned_token")
-            doc = doc_ref.get()
-            if doc.exists:
-                amount = doc.to_dict().get("total_burned_amount", 0.0)
-                return float(amount)
-        if os.path.exists("burned_amount.txt"):
-            with open("burned_amount.txt") as f:
-                return float(f.read().strip())
-    except Exception as e:
-        logger.error(f"Error getting total burned amount: {e}")
-    return 0.0
+    return 0.0  # Legacy, not used in /totalburn
 
 def set_total_burned_amount_local(amount):
-    try:
-        if db:
-            doc_ref = db.collection("token_burn_stats").document("default_total_burned_token")
-            doc_ref.set({"total_burned_amount": amount})
-        with open("burned_amount.txt", "w") as f:
-            f.write(str(amount))
-    except Exception as e:
-        logger.error(f"Error saving total burned amount: {e}")
+    pass  # Legacy, not used in /totalburn
 
 async def monitor_burns():
     logger.info("monitor_burns task started")
@@ -185,7 +186,6 @@ async def monitor_burns():
                 sig = tx.signature
                 if sig == last_signature:
                     break
-                # Fix: Pass max_supported_transaction_version=0!
                 tx_data = client.get_transaction(
                     sig,
                     encoding="jsonParsed",
