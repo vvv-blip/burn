@@ -191,18 +191,22 @@ async def monitor_burns():
                 )
                 if tx_data.value is None or not isinstance(tx_data.value, dict):
                     continue
-                meta = tx_data.value.get("meta")
-                if meta is None or not meta.get("postTokenBalances"):
-                    continue
-                for i, balance in enumerate(meta["postTokenBalances"]):
-                    if balance["mint"] == TOKEN_MINT_ADDRESS_STR:
-                        owner = balance.get("owner")
-                        pre_amount = int(meta["preTokenBalances"][i]["uiTokenAmount"]["amount"])
-                        post_amount = int(balance["uiTokenAmount"]["amount"])
-                        if owner == BURN_ADDRESS and post_amount < pre_amount:
-                            burned = (pre_amount - post_amount) / 10**TOKEN_DECIMALS
-                            new_burns.append((sig, burned))
-                            burned_total += burned
+                # ---- BEGIN: Improved BurnChecked Detection ----
+                try:
+                    instructions = tx_data.value['transaction']['message']['instructions']
+                    for instr in instructions:
+                        if 'program' in instr and 'parsed' in instr:
+                            if (
+                                instr['program'] == 'spl-token'
+                                and instr['parsed']['type'] == 'burnChecked'
+                                and instr['parsed']['info']['mint'] == TOKEN_MINT_ADDRESS_STR
+                            ):
+                                burned = int(instr['parsed']['info']['amount']) / (10 ** TOKEN_DECIMALS)
+                                new_burns.append((sig, burned))
+                                burned_total += burned
+                except Exception as e:
+                    logger.error(f"Error parsing burnChecked instructions in tx {sig}: {e}")
+                # ---- END: Improved BurnChecked Detection ----
             if txs_list:
                 last_signature = txs_list[0].signature
             for sig, burned in reversed(new_burns):
