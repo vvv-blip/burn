@@ -10,9 +10,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 from solana.rpc.api import Client
-import websockets
-from solders.pubkey import Pubkey
-from solders.rpc.config import RpcTransactionConfig
+from solana.publickey import PublicKey
 
 from telegram import Bot, Update
 from telegram.error import TelegramError
@@ -22,7 +20,7 @@ from firebase_admin import credentials, firestore, initialize_app
 from flask import Flask, request
 from waitress import serve
 
-# Set up logging
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -31,31 +29,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Environment Variables
+# Env Vars
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=<YOUR_HELIUS_API_KEY>")
-SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "wss://mainnet.helius-rpc.com/?api-key=<YOUR_HELIUS_API_KEY>")
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 TOKEN_MINT_ADDRESS_STR = os.getenv("TOKEN_MINT_ADDRESS")
 FIREBASE_SERVICE_ACCOUNT_JSON_BASE64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://solana-burn-monitor.onrender.com")
 
-# Constants
-SPL_TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 WEBHOOK_PATH = "/webhook"
+TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "9"))  # Update if your token uses different decimals
+BURN_ADDRESS = "11111111111111111111111111111111"
 
-# Global Variables
-db = None  # Firestore client
-bot = None  # Telegram bot instance
-dispatcher = None  # Telegram Dispatcher instance
-TOKEN_MINT_ADDRESS = None  # Parsed Pubkey of the token mint
-TOKEN_DECIMALS = None  # Number of decimals for the token
-TOTAL_BURNED_AMOUNT_KEY = "default_total_burned_token"
+# Globals
+db = None
+bot = None
+dispatcher = None
+TOKEN_MINT_ADDRESS = None
 
-total_burned_lock = threading.Lock()
-_request_id_counter = itertools.count(1)
-
-# Flask app instance
+# Flask app
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -63,37 +55,21 @@ def health_check():
     logger.info("Health check endpoint accessed")
     return "Bot is running and healthy!", 200
 
-@app_flask.route('/setwebhook')
-def set_webhook_manual():
-    """Manual webhook set trigger for debugging."""
-    global bot
-    try:
-        webhook_url = urljoin(RENDER_EXTERNAL_URL, WEBHOOK_PATH)
-        result = asyncio.run(bot.set_webhook(url=webhook_url))
-        logger.info(f"Manual webhook set to {webhook_url}: {result}")
-        return f"Webhook set to {webhook_url}: {result}", 200
-    except Exception as e:
-        logger.error(f"Error setting webhook manually: {e}")
-        return f"Failed: {e}", 500
-
 @app_flask.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
-    """Handle Telegram webhook updates."""
     try:
         update = Update.de_json(request.get_json(force=True), bot)
-        logger.info(f"Received webhook update: {update}")
         dispatcher.process_update(update)
         return "OK", 200
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
         return "Error", 500
 
-# Firebase Functions
 def initialize_firebase():
     global db
     logger.info("Attempting to initialize Firebase")
     if not FIREBASE_SERVICE_ACCOUNT_JSON_BASE64:
-        logger.warning("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64 not set. Firebase will not be initialized.")
+        logger.warning("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64 not set.")
         return False
     try:
         service_account_info = json.loads(base64.b64decode(FIREBASE_SERVICE_ACCOUNT_JSON_BASE64).decode('utf-8'))
@@ -106,51 +82,14 @@ def initialize_firebase():
         logger.error(f"Error initializing Firebase: {e}")
         return False
 
-async def get_total_burned_amount() -> float:
-    logger.info("Fetching total burned amount")
-    if not db:
-        logger.warning("Firestore not initialized. Returning 0.0 for total burned amount.")
-        return 0.0
-    try:
-        doc_ref = db.collection("token_burn_stats").document(TOTAL_BURNED_AMOUNT_KEY)
-        doc = await asyncio.to_thread(doc_ref.get)
-        if doc.exists:
-            amount = doc.to_dict().get("total_burned_amount", 0.0)
-            if isinstance(amount, (int, float)):
-                logger.info(f"Retrieved total burned amount: {amount}")
-                return float(amount)
-            else:
-                logger.warning(f"Invalid total burned amount in Firestore: {amount}. Returning 0.0.")
-                return 0.0
-        logger.info(f"Total burned amount document '{TOTAL_BURNED_AMOUNT_KEY}' not found. Returning 0.0.")
-        return 0.0
-    except Exception as e:
-        logger.error(f"Error getting total burned amount: {e}")
-        return 0.0
-
-async def update_total_burned_amount(amount: float):
-    logger.info(f"Updating total burned amount to {amount}")
-    if not db:
-        logger.warning("Firestore not initialized. Skipping update of total burned amount.")
-        return
-    try:
-        doc_ref = db.collection("token_burn_stats").document(TOTAL_BURNED_AMOUNT_KEY)
-        await asyncio.to_thread(doc_ref.set, {"total_burned_amount": amount})
-        logger.info(f"Total burned amount updated to {amount}")
-    except Exception as e:
-        logger.error(f"Error updating total burned amount: {e}")
-
-# Solana Functions (unchanged, omitted for brevity, use your original ones...)
-
-# Telegram Functions
 async def send_telegram_message(message: str):
     global bot
-    logger.info(f"Attempting to send Telegram message: {message}")
+    logger.info(f"Sending Telegram message: {message}")
     if not bot or not TELEGRAM_CHAT_ID:
-        logger.error("Telegram Bot or Chat ID not initialized. Cannot send message.")
+        logger.error("Telegram Bot or Chat ID not initialized.")
         return
     try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
         logger.info(f"Telegram message sent to chat {TELEGRAM_CHAT_ID}: '{message}'")
     except TelegramError as e:
         logger.error(f"Error sending Telegram message: {e}")
@@ -159,10 +98,6 @@ async def send_telegram_message(message: str):
 
 def start_command(update: Update, context: CallbackContext):
     try:
-        chat_type = update.message.chat.type
-        chat_id = update.message.chat_id
-        user = update.message.from_user
-        logger.info(f"Received /start command from user @{user.username} (ID: {user.id}) in {chat_type} chat (ID: {chat_id})")
         update.message.reply_text(
             "🔥 Welcome to the Solana Burn Monitor Bot! 🔥\n\n"
             "I monitor token burns for $JEWS on Solana and notify the group.\n\n"
@@ -196,21 +131,18 @@ def whomadethebot_command(update: Update, context: CallbackContext):
 
 def total_burn_command(update: Update, context: CallbackContext):
     try:
-        async def send_total_burn():
-            total_burned = await get_total_burned_amount()
-            token_symbol = "JEWS"
-            message = (
-                f"🔥 *Burn Status!* 🔥\n\n"
-                f"Total burned ${token_symbol}: *{total_burned:,.{TOKEN_DECIMALS if TOKEN_DECIMALS is not None else 0}f}* 🔥\n"
-                f"Keep the flames roaring! 😼"
-            )
-            update.message.reply_text(message, parse_mode='Markdown')
-        asyncio.run(send_total_burn())
+        total_burned = get_total_burned_amount_local()
+        token_symbol = "JEWS"
+        message = (
+            f"🔥 *Burn Status!* 🔥\n\n"
+            f"Total burned ${token_symbol}: *{total_burned:,.{TOKEN_DECIMALS}f}* 🔥\n"
+            f"Keep the flames roaring! 😼"
+        )
+        update.message.reply_text(message, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Error handling /totalburn command: {e}")
 
 def setup_dispatcher(bot_instance):
-    """Initialize the dispatcher (used for webhook mode)."""
     disp = Dispatcher(bot_instance, None, workers=0, use_context=True)
     disp.add_handler(CommandHandler("start", start_command))
     disp.add_handler(CommandHandler("help", help_command))
@@ -218,17 +150,98 @@ def setup_dispatcher(bot_instance):
     disp.add_handler(CommandHandler("totalburn", total_burn_command))
     return disp
 
+# --- Burn Monitoring Logic ---
+
+def get_total_burned_amount_local():
+    # Use Firebase, or fallback to local file (for demo)
+    try:
+        if db:
+            doc_ref = db.collection("token_burn_stats").document("default_total_burned_token")
+            doc = doc_ref.get()
+            if doc.exists:
+                amount = doc.to_dict().get("total_burned_amount", 0.0)
+                return float(amount)
+        # fallback: local file
+        if os.path.exists("burned_amount.txt"):
+            with open("burned_amount.txt") as f:
+                return float(f.read().strip())
+    except Exception as e:
+        logger.error(f"Error getting total burned amount: {e}")
+    return 0.0
+
+def set_total_burned_amount_local(amount):
+    try:
+        if db:
+            doc_ref = db.collection("token_burn_stats").document("default_total_burned_token")
+            doc_ref.set({"total_burned_amount": amount})
+        with open("burned_amount.txt", "w") as f:
+            f.write(str(amount))
+    except Exception as e:
+        logger.error(f"Error saving total burned amount: {e}")
+
+async def monitor_burns():
+    logger.info("monitor_burns task started")
+    client = Client(SOLANA_RPC_URL)
+    mint_pubkey = PublicKey(TOKEN_MINT_ADDRESS_STR)
+    last_signature = None
+    burned_total = get_total_burned_amount_local()
+    logger.info(f"Monitoring burns for: {TOKEN_MINT_ADDRESS_STR}")
+
+    while True:
+        try:
+            # Fetch transactions involving the mint address
+            # We'll use get_signatures_for_address on the mint address for recent activity
+            txs = client.get_signatures_for_address(mint_pubkey, limit=20)
+            txs_list = txs['result']
+
+            new_burns = []
+            for tx in txs_list:
+                sig = tx["signature"]
+                if sig == last_signature:
+                    break
+                # Now, check what this transaction did
+                tx_data = client.get_transaction(sig)
+                meta = tx_data['result']['meta']
+                if not meta or not meta.get("postTokenBalances"):
+                    continue
+                # Look for a burn: owner is '1111...'
+                for i, balance in enumerate(meta["postTokenBalances"]):
+                    if balance["mint"] == TOKEN_MINT_ADDRESS_STR:
+                        owner = balance.get("owner")
+                        pre_amount = int(meta["preTokenBalances"][i]["uiTokenAmount"]["amount"])
+                        post_amount = int(balance["uiTokenAmount"]["amount"])
+                        if owner == BURN_ADDRESS and post_amount < pre_amount:
+                            burned = (pre_amount - post_amount) / 10**TOKEN_DECIMALS
+                            new_burns.append((sig, burned))
+                            burned_total += burned
+            if txs_list:
+                last_signature = txs_list[0]["signature"]
+            # Notify for new burns
+            for sig, burned in reversed(new_burns):
+                link = f"https://solscan.io/tx/{sig}"
+                await send_telegram_message(
+                    f"🔥 *Token Burned!* 🔥\n\n"
+                    f"Amount: *{burned:,.{TOKEN_DECIMALS}f}* $JEWS\n"
+                    f"[View Transaction]({link})"
+                )
+                logger.info(f"Burn event: {burned} at {sig}")
+            if new_burns:
+                set_total_burned_amount_local(burned_total)
+            await asyncio.sleep(45)  # Tune as needed for your needs
+        except Exception as e:
+            logger.error(f"Error in monitor_burns: {e}", exc_info=True)
+            await asyncio.sleep(60)
+
 async def init_bot_components():
-    global bot, dispatcher, TOKEN_MINT_ADDRESS, TOKEN_DECIMALS, TOTAL_BURNED_AMOUNT_KEY
+    global bot, dispatcher, TOKEN_MINT_ADDRESS
     logger.info("Starting bot component initialization")
-    # Environment variable validation
+    # Validate env
     env_vars = {
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
         "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
         "TOKEN_MINT_ADDRESS": TOKEN_MINT_ADDRESS_STR,
         "GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64": FIREBASE_SERVICE_ACCOUNT_JSON_BASE64,
         "SOLANA_RPC_URL": SOLANA_RPC_URL,
-        "SOLANA_WS_URL": SOLANA_WS_URL,
         "RENDER_EXTERNAL_URL": RENDER_EXTERNAL_URL
     }
     for key, value in env_vars.items():
@@ -238,35 +251,34 @@ async def init_bot_components():
         logger.critical(f"Missing environment variables: {missing_vars}. Bot cannot start.")
         raise SystemExit(f"Missing environment variables: {missing_vars}")
 
-    # Initialize Telegram bot and dispatcher
+    # Telegram
     logger.info("Initializing Telegram bot")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     bot_info = bot.get_me()
     logger.info(f"Telegram bot initialized as @{bot_info.username}")
 
-    # Set the webhook
+    # Webhook setup
     logger.info("Setting up Telegram webhook")
     webhook_url = urljoin(RENDER_EXTERNAL_URL, WEBHOOK_PATH)
     bot.delete_webhook()
     result = bot.set_webhook(url=webhook_url)
     logger.info(f"Webhook set to {webhook_url}: {result}")
 
-    # Firebase
+    # Firebase (optional)
     initialize_firebase()
 
-    # Telegram dispatcher (for webhook mode)
+    # Dispatcher
     logger.info("Initializing Telegram Dispatcher")
     global dispatcher
     dispatcher = setup_dispatcher(bot)
 
-    # Start Solana burn monitor (run in background)
+    # Start burn monitor
     logger.info("Starting Solana burn monitoring")
-    asyncio.create_task(monitor_burns())  # Ensure you copy your original monitor_burns() here
+    asyncio.create_task(monitor_burns())
 
 if __name__ == "__main__":
     logger.info("Starting main application")
     try:
-        # Run async bot init before starting Flask
         asyncio.run(init_bot_components())
         port = int(os.getenv("PORT", 10000))
         logger.info(f"Starting Flask web service on port {port}")
