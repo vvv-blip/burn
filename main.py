@@ -241,7 +241,8 @@ async def init_bot_components():
     # Initialize Telegram bot and dispatcher
     logger.info("Initializing Telegram bot")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    bot_info = await bot.get_me()
+    # --------- FIXED LINE BELOW (removed await) -------------
+    bot_info = bot.get_me()
     logger.info(f"Telegram bot initialized as @{bot_info.username}")
 
     # Set the webhook
