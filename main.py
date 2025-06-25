@@ -3,8 +3,6 @@ import asyncio
 import json
 import base64
 import logging
-import threading
-import itertools
 import sys
 from typing import Optional
 from urllib.parse import urljoin
@@ -35,7 +33,7 @@ TOKEN_MINT_ADDRESS_STR = os.getenv("TOKEN_MINT_ADDRESS")
 FIREBASE_SERVICE_ACCOUNT_JSON_BASE64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://solana-burn-monitor.onrender.com")
 WEBHOOK_PATH = "/webhook"
-TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "9"))  # update if your token uses different decimals
+TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "9"))
 BURN_ADDRESS = "11111111111111111111111111111111"
 
 db = None
@@ -180,28 +178,31 @@ async def monitor_burns():
     while True:
         try:
             txs = client.get_signatures_for_address(mint_pubkey, limit=20)
-            txs_list = txs['result']
+            txs_list = txs.value  # solders returns a namedtuple/list, not a dict
 
             new_burns = []
             for tx in txs_list:
-                sig = tx["signature"]
+                sig = tx.signature
                 if sig == last_signature:
                     break
                 tx_data = client.get_transaction(sig)
-                meta = tx_data['result']['meta']
-                if not meta or not meta.get("postTokenBalances"):
+                if tx_data.value is None:
                     continue
-                for i, balance in enumerate(meta["postTokenBalances"]):
-                    if balance["mint"] == TOKEN_MINT_ADDRESS_STR:
-                        owner = balance.get("owner")
-                        pre_amount = int(meta["preTokenBalances"][i]["uiTokenAmount"]["amount"])
-                        post_amount = int(balance["uiTokenAmount"]["amount"])
+                meta = tx_data.value.meta
+                # It's possible meta is None
+                if meta is None or not hasattr(meta, "post_token_balances") or not meta.post_token_balances:
+                    continue
+                for i, balance in enumerate(meta.post_token_balances):
+                    if balance.mint == TOKEN_MINT_ADDRESS_STR:
+                        owner = getattr(balance, "owner", None)
+                        pre_amount = int(meta.pre_token_balances[i].ui_token_amount.amount)
+                        post_amount = int(balance.ui_token_amount.amount)
                         if owner == BURN_ADDRESS and post_amount < pre_amount:
                             burned = (pre_amount - post_amount) / 10**TOKEN_DECIMALS
                             new_burns.append((sig, burned))
                             burned_total += burned
             if txs_list:
-                last_signature = txs_list[0]["signature"]
+                last_signature = txs_list[0].signature
             for sig, burned in reversed(new_burns):
                 link = f"https://solscan.io/tx/{sig}"
                 await send_telegram_message(
