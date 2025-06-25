@@ -2,3 +2,6 @@ solana==0.28.1
 python-telegram-bot
 firebase-admin
 websockets
+Flask
+waitress
+
