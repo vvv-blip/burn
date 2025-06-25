@@ -186,7 +186,7 @@ async def monitor_burns():
                 if sig == last_signature:
                     break
                 tx_data = client.get_transaction(sig, encoding="jsonParsed")
-                if tx_data.value is None:
+                if tx_data.value is None or not isinstance(tx_data.value, dict):
                     continue
                 meta = tx_data.value.get("meta")
                 if meta is None or not meta.get("postTokenBalances"):
