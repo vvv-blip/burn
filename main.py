@@ -178,25 +178,24 @@ async def monitor_burns():
     while True:
         try:
             txs = client.get_signatures_for_address(mint_pubkey, limit=20)
-            txs_list = txs.value  # solders returns a namedtuple/list, not a dict
+            txs_list = txs.value
 
             new_burns = []
             for tx in txs_list:
                 sig = tx.signature
                 if sig == last_signature:
                     break
-                tx_data = client.get_transaction(sig)
+                tx_data = client.get_transaction(sig, encoding="jsonParsed")
                 if tx_data.value is None:
                     continue
-                meta = tx_data.value.meta
-                # It's possible meta is None
-                if meta is None or not hasattr(meta, "post_token_balances") or not meta.post_token_balances:
+                meta = tx_data.value.get("meta")
+                if meta is None or not meta.get("postTokenBalances"):
                     continue
-                for i, balance in enumerate(meta.post_token_balances):
-                    if balance.mint == TOKEN_MINT_ADDRESS_STR:
-                        owner = getattr(balance, "owner", None)
-                        pre_amount = int(meta.pre_token_balances[i].ui_token_amount.amount)
-                        post_amount = int(balance.ui_token_amount.amount)
+                for i, balance in enumerate(meta["postTokenBalances"]):
+                    if balance["mint"] == TOKEN_MINT_ADDRESS_STR:
+                        owner = balance.get("owner")
+                        pre_amount = int(meta["preTokenBalances"][i]["uiTokenAmount"]["amount"])
+                        post_amount = int(balance["uiTokenAmount"]["amount"])
                         if owner == BURN_ADDRESS and post_amount < pre_amount:
                             burned = (pre_amount - post_amount) / 10**TOKEN_DECIMALS
                             new_burns.append((sig, burned))
