@@ -14,6 +14,9 @@ from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import CommandHandler, CallbackContext, Dispatcher
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 from firebase_admin import credentials, firestore, initialize_app
 from flask import Flask, request
 from waitress import serve
@@ -42,6 +45,11 @@ INITIAL_SUPPLY = 15800000  # <-- Your token's initial supply (change if needed)
 db = None
 bot = None
 dispatcher = None
+
+# Scheduler setup
+scheduler = AsyncIOScheduler()
+scheduler.start()
+scheduled_job = None  # handle for the current scheduled job
 
 app_flask = Flask(__name__)
 
@@ -103,11 +111,15 @@ async def send_telegram_message(message: str):
 def start_command(update: Update, context: CallbackContext):
     try:
         update.message.reply_text(
-            "🔥* Welcome to GOY ARMY $JEWS burner program *🔥\n\n"
-            "I monitor $JEWS burns on Solana.\n\n"
-            "Command:\n"
-            "• `/totalburn`: View total $JEWS burned (from blockchain)\n\n"
-            "* NIGGA HEIL HITLER- Kanye West * ",
+            "🔥 Welcome to the Solana Burn Monitor Bot! 🔥\n\n"
+            "I monitor token burns for $JEWS on Solana and notify the group.\n\n"
+            "Commands:\n"
+            "• `/totalburn`: View total $JEWS burned (from blockchain)\n"
+            "• `/setschedule HH:MM [daily|hourly]`: Schedule automatic total burn messages (admin only)\n"
+            "• `/cancelschedule`: Cancel scheduled burn messages (admin only)\n"
+            "• `/help`: List all commands.\n"
+            "• `/whomadethebot`: Bot creator info.\n\n"
+            "Let the flames begin! 🚀",
             parse_mode='Markdown'
         )
     except Exception as e:
@@ -119,6 +131,8 @@ def help_command(update: Update, context: CallbackContext):
             "🔥 Solana Burn Monitor Bot Commands:\n\n"
             "• `/start`: Welcome message.\n"
             "• `/totalburn`: Blockchain-based total $JEWS burned.\n"
+            "• `/setschedule HH:MM [daily|hourly]`: Schedule automatic total burn messages (admin only)\n"
+            "• `/cancelschedule`: Cancel scheduled burn messages (admin only)\n"
             "• `/whomadethebot`: Bot creator.\n",
             parse_mode='Markdown'
         )
@@ -139,7 +153,7 @@ def total_burn_command(update: Update, context: CallbackContext):
         burned = INITIAL_SUPPLY - current_supply
         token_symbol = "JEWS"
         message = (
-            f"🔥 *Total $JEWS Burned* 🔥\n\n"
+            f"🔥 *Total Burned (from Blockchain)* 🔥\n\n"
             f"Total burned ${token_symbol}: *{burned:,.2f}* 🔥\n"
             f"(since inception, on-chain)"
         )
@@ -148,12 +162,91 @@ def total_burn_command(update: Update, context: CallbackContext):
         logger.error(f"Error handling /totalburn command: {e}")
         update.message.reply_text("Error fetching blockchain burn data.")
 
+def is_admin(update: Update, context: CallbackContext):
+    try:
+        chat_member = context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+        return chat_member.status in ["administrator", "creator"]
+    except Exception as e:
+        logger.error(f"Failed to check admin status: {e}")
+        return False
+
+async def send_scheduled_totalburn():
+    try:
+        client = Client(SOLANA_RPC_URL)
+        resp = client.get_token_supply(Pubkey.from_string(TOKEN_MINT_ADDRESS_STR))
+        current_supply = int(resp.value.amount) / (10 ** resp.value.decimals)
+        burned = INITIAL_SUPPLY - current_supply
+        token_symbol = "JEWS"
+        message = (
+            f"🔥 *Total Burned (Scheduled Report)* 🔥\n\n"
+            f"Total burned ${token_symbol}: *{burned:,.2f}* 🔥\n"
+            f"(since inception, on-chain)"
+        )
+        await send_telegram_message(message)
+    except Exception as e:
+        logger.error(f"Error sending scheduled totalburn: {e}")
+
+def setschedule_command(update: Update, context: CallbackContext):
+    global scheduled_job
+    if not is_admin(update, context):
+        update.message.reply_text("Only admins can set the schedule!")
+        return
+
+    if len(context.args) < 1:
+        update.message.reply_text("Usage: /setschedule HH:MM [daily|hourly]")
+        return
+
+    time_part = context.args[0]
+    interval = context.args[1] if len(context.args) > 1 else "daily"
+
+    try:
+        if interval == "hourly":
+            minute = int(time_part)
+            hour = None
+        else:
+            hour, minute = map(int, time_part.split(":"))
+    except Exception:
+        update.message.reply_text("Invalid time format. Use HH:MM (e.g. 14:00) or [minute] for hourly.")
+        return
+
+    # Remove old job
+    if scheduled_job:
+        scheduled_job.remove()
+    
+    if interval == "hourly":
+        trigger = CronTrigger(minute=minute)
+        interval_text = f"every hour at minute {minute:02d}"
+    else:
+        trigger = CronTrigger(hour=hour, minute=minute)
+        interval_text = f"every day at {hour:02d}:{minute:02d}"
+
+    scheduled_job = scheduler.add_job(
+        lambda: asyncio.create_task(send_scheduled_totalburn()),
+        trigger=trigger,
+        name="Scheduled Total Burn"
+    )
+    update.message.reply_text(f"Scheduled total burn report {interval_text}.")
+
+def cancelschedule_command(update: Update, context: CallbackContext):
+    global scheduled_job
+    if not is_admin(update, context):
+        update.message.reply_text("Only admins can cancel the schedule!")
+        return
+    if scheduled_job:
+        scheduled_job.remove()
+        scheduled_job = None
+        update.message.reply_text("Scheduled total burn report cancelled.")
+    else:
+        update.message.reply_text("No scheduled report to cancel.")
+
 def setup_dispatcher(bot_instance):
     disp = Dispatcher(bot_instance, None, workers=0, use_context=True)
     disp.add_handler(CommandHandler("start", start_command))
     disp.add_handler(CommandHandler("help", help_command))
     disp.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
     disp.add_handler(CommandHandler("totalburn", total_burn_command))
+    disp.add_handler(CommandHandler("setschedule", setschedule_command, pass_args=True))
+    disp.add_handler(CommandHandler("cancelschedule", cancelschedule_command))
     return disp
 
 # The following functions are retained for monitoring and storage,
@@ -210,7 +303,7 @@ async def monitor_burns():
             for sig, burned in reversed(new_burns):
                 link = f"https://solscan.io/tx/{sig}"
                 await send_telegram_message(
-                    f"🔥 *$JEWS Burned!* 🔥\n\n"
+                    f"🔥 *Token Burned!* 🔥\n\n"
                     f"Amount: *{burned:,.{TOKEN_DECIMALS}f}* $JEWS\n"
                     f"[View Transaction]({link})"
                 )
