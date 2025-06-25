@@ -14,7 +14,7 @@ from solders.rpc.config import RpcTransactionConfig
 
 from telegram import Bot, Update
 from telegram.error import TelegramError
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Updater, CommandHandler, CallbackContext
 
 from firebase_admin import credentials, firestore, initialize_app
 from flask import Flask
@@ -38,7 +38,7 @@ SPL_TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss62
 # Global Variables
 db = None  # Firestore client
 bot = None  # Telegram bot instance
-application = None  # Telegram Application instance
+updater = None  # Telegram Updater instance
 TOKEN_MINT_ADDRESS = None  # Parsed Pubkey of the token mint
 TOKEN_DECIMALS = None  # Number of decimals for the token
 TOTAL_BURNED_AMOUNT_KEY = "default_total_burned_token"
@@ -256,9 +256,9 @@ async def send_telegram_message(message: str):
     except Exception as e:
         logger.error(f"Unexpected error sending Telegram message: {e}")
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start_command(update: Update, context: CallbackContext):
     """Handles /start command."""
-    await update.message.reply_text(
+    update.message.reply_text(
         "🔥 Welcome to the Solana Burn Monitor Bot! 🔥\n\n"
         "I monitor token burns for $JEWS on Solana and notify this group.\n\n"
         "Commands:\n"
@@ -269,9 +269,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def help_command(update: Update, context: CallbackContext):
     """Handles /help command."""
-    await update.message.reply_text(
+    update.message.reply_text(
         "🔥 Solana Burn Monitor Bot Commands:\n\n"
         "• `/start`: Welcome message.\n"
         "• `/totalburn`: Total $JEWS burned.\n"
@@ -279,24 +279,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def whomadethebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def whomadethebot_command(update: Update, context: CallbackContext):
     """Handles /whomadethebot command."""
-    await update.message.reply_text("@nakatroll")
+    update.message.reply_text("@nakatroll")
 
-async def total_burn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def total_burn_command(update: Update, context: CallbackContext):
     """Handles /totalburn command."""
-    total_burned = await get_total_burned_amount()
-    token_symbol = "JEWS"
-    message = (
-        f"🔥 *Burn Status!* 🔥\n\n"
-        f"Total burned ${token_symbol}: *{total_burned:,.{TOKEN_DECIMALS if TOKEN_DECIMALS is not None else 0}f}* 🔥\n"
-        f"Keep the flames roaring! 😼"
-    )
-    await update.message.reply_text(message, parse_mode='Markdown')
+    async def send_total_burn():
+        total_burned = await get_total_burned_amount()
+        token_symbol = "JEWS"
+        message = (
+            f"🔥 *Burn Status!* 🔥\n\n"
+            f"Total burned ${token_symbol}: *{total_burned:,.{TOKEN_DECIMALS if TOKEN_DECIMALS is not None else 0}f}* 🔥\n"
+            f"Keep the flames roaring! 😼"
+        )
+        update.message.reply_text(message, parse_mode='Markdown')
+    context.job_queue.run_once(lambda _: updater.dispatcher.run_async(send_total_burn), 0)
 
 async def init_bot_components():
     """Initializes Telegram bot and starts async tasks."""
-    global bot, application
+    global bot, updater
     # Enhanced environment variable validation
     env_vars = {
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
@@ -325,13 +327,14 @@ async def init_bot_components():
         logger.error(f"Failed to initialize Telegram bot: {e}")
         raise SystemExit("Telegram bot initialization failed")
     
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
-    application.add_handler(CommandHandler("totalburn", total_burn_command))
+    updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+    dispatcher.add_handler(CommandHandler("start", start_command))
+    dispatcher.add_handler(CommandHandler("help", help_command))
+    dispatcher.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
+    dispatcher.add_handler(CommandHandler("totalburn", total_burn_command))
     
-    asyncio.create_task(application.run_polling())
+    updater.start_polling()
     logger.info("Telegram bot polling started.")
     asyncio.create_task(monitor_burns())
     logger.info("Solana burn monitoring started.")
