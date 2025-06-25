@@ -1,0 +1,4 @@
+solana
+python-telegram-bot
+firebase-admin
+websockets
