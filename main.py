@@ -5,13 +5,14 @@ import base64
 import logging
 import threading
 from solana.rpc.api import Client
-from solana.rpc.websocket_api import SolanaWsClient, logs_subscribe
+# Changed: Import websockets directly instead of SolanaWsClient
+import websockets
+from solana.rpc.websocket_api import logs_subscribe # logs_subscribe is still used from solana.rpc.websocket_api
 from solders.pubkey import Pubkey
 from solders.rpc.config import RpcTransactionConfig, RpcTransactionLogsConfig
 from telegram import Bot, Update
 from telegram.error import TelegramError
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes # Import necessary components for CommandHandler
-from firebase_admin import credentials, firestore, initialize_app
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # --- Set up logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__) # Define a logger instance
 # Telegram Bot Token (obtained from BotFather)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Telegram Chat ID where messages will be sent
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") # This is for global notifications. Individual chat IDs are not stored directly for commands.
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # Solana RPC URL (e.g., "https://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 # Solana WebSocket URL (e.g., "wss://api.mainnet-beta.solana.com")
@@ -199,16 +200,13 @@ async def process_solana_transaction(solana_client: Client, signature: str):
             logger.info(f"Detected burn of {burned_amount_readable} tokens (raw: {burned_amount_raw}). Signature: {signature}")
 
             # Update the total burned amount in Firestore
-            # Use the lock to ensure consistency if multiple asynchronous updates were happening simultaneously,
-            # though get/set Firestore operations are atomic for the document update itself.
             with total_burned_lock:
                 current_total_burned = await get_total_burned_amount()
                 new_total_burned = current_total_burned + burned_amount_readable
                 await update_total_burned_amount(new_total_burned)
 
-            # Prepare and send the Telegram message
             # For simplicity, using "JEWS" as requested previously.
-            token_symbol = "JEWS" 
+            token_symbol = "JEWS"
             message = (
                 f"🔥 Someone burned {burned_amount_readable:,.{TOKEN_DECIMALS}f} ${token_symbol}!\n"
                 f"📊 Total amount of burned {token_symbol} is now {new_total_burned:,.{TOKEN_DECIMALS}f}"
@@ -254,11 +252,11 @@ async def monitor_burns():
     # Main loop for WebSocket connection and re-connection
     while True:
         try:
-            async with SolanaWsClient(SOLANA_WS_URL) as ws:
-                # Subscribe to logs for the SPL Token Program ID.
-                # This allows us to receive notifications whenever a transaction
-                # involves the SPL Token Program, including burn instructions.
-                await ws.logs_subscribe(
+            # Changed: Use websockets.connect directly
+            async with websockets.connect(SOLANA_WS_URL) as ws:
+                # Subscribe to logs using the solana.py function, passing the direct websocket connection
+                await logs_subscribe(
+                    ws, # Pass the raw websocket connection
                     filter_=RpcTransactionLogsConfig(
                         mentions=[SPL_TOKEN_PROGRAM_ID], # Filter logs mentioning the SPL Token Program
                         commitment="confirmed" # Listen for logs on confirmed blocks
@@ -270,10 +268,11 @@ async def monitor_burns():
                 # Process incoming WebSocket messages
                 async for msg in ws:
                     try:
-                        # Extract log information from the WebSocket message
-                        # The structure is: msg -> 'params' -> 'result' -> 'value'
-                        if msg and 'params' in msg and 'result' in msg['params'] and 'value' in msg['params']['result']:
-                            log_info = msg['params']['result']['value']
+                        # The structure of the message from websockets.connect and logs_subscribe might be slightly different
+                        # from what SolanaWsClient would automatically parse. Need to re-parse.
+                        msg_data = json.loads(msg) # Parse the raw JSON string received from the websocket
+                        if msg_data and 'params' in msg_data and 'result' in msg_data['params'] and 'value' in msg_data['params']['result']:
+                            log_info = msg_data['params']['result']['value']
                             signature = log_info['signature']
                             logs = log_info['logs']
                             err = log_info['err']
@@ -284,7 +283,6 @@ async def monitor_burns():
                                 continue
 
                             # Check if any log message indicates a "Burn" or "BurnChecked" instruction.
-                            # This is a preliminary filter to reduce unnecessary RPC calls to get full transaction details.
                             is_burn_log = False
                             for log in logs:
                                 if "Program log: Instruction: Burn" in log or "Program log: Instruction: BurnChecked" in log:
@@ -292,12 +290,13 @@ async def monitor_burns():
                                     break
                             
                             if is_burn_log:
-                                # If a potential burn log is detected, fetch and process the full transaction.
                                 logger.info(f"Detected potential burn log in transaction {signature}. Fetching full transaction details.")
                                 await process_solana_transaction(solana_client, signature)
                             else:
                                 logger.debug(f"Skipping non-burn related logs for signature: {signature}")
 
+                    except json.JSONDecodeError as jde:
+                        logger.error(f"Failed to decode WebSocket message JSON: {jde}. Message: {msg}")
                     except Exception as e:
                         logger.error(f"Error processing individual WebSocket message: {e}")
         except Exception as e:
@@ -402,7 +401,7 @@ async def run_bot():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("whomadethebot", whomadethebot_command))
-    application.add_handler(CommandHandler("totalburn", total_burn_command)) # New totalburn command
+    application.add_handler(CommandHandler("totalburn", total_burn_command))
 
     # Start polling for Telegram updates in a background task
     # This keeps the Telegram bot active and listening for commands
@@ -422,3 +421,4 @@ if __name__ == "__main__":
         logger.info("Bot stopped manually by KeyboardInterrupt.")
     except Exception as e:
         logger.critical(f"An unhandled critical error occurred, bot is stopping: {e}", exc_info=True)
+
